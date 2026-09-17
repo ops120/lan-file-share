@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+}
+
+/*
+ * 主题变量
+ * 默认白天（亮色）；<html class="dark"> 时切换为夜间（暗色）。
+ * 组件只使用语义色（bg-surface-* / text-strong|body|soft|faint / bg-overlay），
+ * 因此换主题不需要改任何组件代码。
+ */
+:root {
+  --surface-1: #F4F6FA;   /* 页面底色 */
+  --surface-2: #FFFFFF;   /* 卡片 */
+  --surface-3: #FFFFFF;   /* 面板 */
+  --surface-4: #ECF0F6;   /* 次级填充、边框 */
+  --surface-5: #DFE6EF;   /* hover / 更深的填充 */
+  --text-strong: #0F172A;
+  --text-body: #1F2937;
+  --text-soft: #5B6B7F;
+  --text-faint: #8A98A8;
+  --accent: #0284C7;
+  --accent-muted: #0369A1;
+  --overlay: rgba(15, 23, 42, 0.45);
+  --scroll-track: #ECF0F6;
+  --scroll-thumb: #C6D0DC;
+  --scroll-thumb-hover: #9AA8B8;
+}
+
+.dark {
+  --surface-1: #05070C;
+  --surface-2: #0A0D12;
+  --surface-3: #0F131C;
+  --surface-4: #161D2B;
+  --surface-5: #1E2636;
+  --text-strong: #F9FAFB;
+  --text-body: #E5E7EB;
+  --text-soft: #9CA3AF;
+  --text-faint: #6B7280;
+  --accent: #38BDF8;
+  --accent-muted: #0EA5E9;
+  --overlay: rgba(0, 0, 0, 0.7);
+  --scroll-track: #0F131C;
+  --scroll-thumb: #1E2636;
+  --scroll-thumb-hover: #2D3748;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: var(--surface-1);
+  color: var(--text-body);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+code {
+  font-family: var(--font-mono);
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scroll-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scroll-thumb-hover);
+}

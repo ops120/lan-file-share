@@ -1,0 +1,40 @@
+本地文件交互系统 (LAN File Share)
+Copyright 2026 你们喜爱的老王 (GitHub @ops120)
+
+作者 / Author: 你们喜爱的老王
+  B 站：@你们喜爱的老王
+  GitHub：@ops120
+
+This product includes software developed as part of the
+本地文件交互系统 (LAN File Share) project.
+
+--------------------------------------------------------------------------------
+Third-party components
+--------------------------------------------------------------------------------
+
+The following components are used as dependencies and remain under their own
+licenses. Their full license texts ship with each package
+(see node_modules/<package>/LICENSE).
+
+Apache-2.0
+  - Playwright (@playwright/test) — https://github.com/microsoft/playwright
+
+MIT
+  - express, multer, cors, ws, sql.js, qrcode, nanoid, bonjour-service
+  - react, react-dom, zustand, vite, @vitejs/plugin-react
+  - tailwindcss, postcss, autoprefixer, concurrently
+
+ISC
+  - qrcode.react
+
+--------------------------------------------------------------------------------
+署名要求（Apache License 2.0 第 4 条）
+--------------------------------------------------------------------------------
+
+分发本项目的副本或修改版时，请随产品一并提供：
+
+  1. LICENSE 文件的副本；
+  2. 本 NOTICE 文件的内容（可读形式）；
+  3. 若修改过源文件，在相应文件中注明"已修改"。
+
+不得移除或篡改本文件中以及源码中的版权、专利、商标与归属声明。

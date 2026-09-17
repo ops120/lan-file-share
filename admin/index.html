@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>管理后台 - 本地文件交互系统</title>
+  <style>
+    /* 默认白天（亮色）；<html class="dark"> 时切换为夜间 */
+    :root {
+      --bg-primary: #F4F6FA;
+      --bg-secondary: #FFFFFF;
+      --bg-tertiary: #ECF0F6;
+      --accent: #0284C7;
+      --text-primary: #0F172A;
+      --text-secondary: #5B6B7F;
+      --border: #D8E0EA;
+      --success: #047857;
+      --danger: #DC2626;
+      --header-bg: rgba(255, 255, 255, 0.92);
+    }
+
+    .dark {
+      --bg-primary: #0A0D12;
+      --bg-secondary: #0F131C;
+      --bg-tertiary: #161D2B;
+      --accent: #38BDF8;
+      --text-primary: #F8FAFC;
+      --text-secondary: #94A3B8;
+      --border: #1E293B;
+      --success: #6EE7B7;
+      --danger: #F87171;
+      --header-bg: rgba(10, 13, 18, 0.92);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    header {
+      margin-bottom: 3rem;
+    }
+
+    .header-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .theme-toggle {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .theme-toggle:hover {
+      border-color: var(--accent);
+    }
+
+    h1 {
+      font-size: clamp(1.75rem, 4vw, 2.5rem);
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.02em;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 1rem;
+    }
+
+    .card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 2rem;
+      margin-bottom: 2rem;
+    }
+
+    .card h2 {
+      font-size: 1.5rem;
+      margin-bottom: 1.5rem;
+      font-weight: 600;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+
+    .stat-item {
+      background: var(--bg-tertiary);
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+
+    .stat-label {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .stat-value {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .form-group {
+      margin-bottom: 1.5rem;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+      font-weight: 500;
+    }
+
+    input[type="text"],
+    input[type="number"] {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-primary);
+      font-size: 1rem;
+      transition: border-color 0.2s;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .btn {
+      padding: 0.75rem 1.5rem;
+      border-radius: 999px;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 0.9375rem;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: var(--bg-primary);
+    }
+
+    .btn-primary:hover {
+      background: #0EA5E9;
+    }
+
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #EF4444;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 1rem;
+      margin-top: 2rem;
+    }
+
+    .alert {
+      padding: 1rem;
+      border-radius: 8px;
+      margin-bottom: 1rem;
+      display: none;
+    }
+
+    .alert.show {
+      display: block;
+    }
+
+    .alert-success {
+      background: rgba(110, 231, 183, 0.1);
+      border: 1px solid var(--success);
+      color: var(--success);
+    }
+
+    .alert-error {
+      background: rgba(248, 113, 113, 0.1);
+      border: 1px solid var(--danger);
+      color: var(--danger);
+    }
+
+    .file-list {
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem;
+      background: var(--bg-tertiary);
+      border-radius: 8px;
+      margin-bottom: 0.5rem;
+    }
+
+    .file-info {
+      flex: 1;
+    }
+
+    .file-name {
+      font-weight: 500;
+      margin-bottom: 0.25rem;
+    }
+
+    .file-meta {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+
+    .loading {
+      text-align: center;
+      color: var(--text-secondary);
+      padding: 2rem;
+    }
+
+    @media (max-width: 768px) {
+      .container {
+        padding: 1rem;
+      }
+
+      .btn-group {
+        flex-direction: column;
+      }
+
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-row">
+        <div>
+          <h1>🔧 管理后台</h1>
+          <p class="subtitle">本地文件交互系统配置与管理</p>
+        </div>
+        <button type="button" id="themeToggle" class="btn theme-toggle" title="切换主题">🌙 夜间</button>
+      </div>
+    </header>
+
+    <div id="alert" class="alert"></div>
+
+    <!-- 系统状态 -->
+    <div class="card">
+      <h2>系统状态</h2>
+      <div class="stats-grid">
+        <div class="stat-item">
+          <div class="stat-label">文件总数</div>
+          <div class="stat-value" id="fileCount">-</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">总存储大小</div>
+          <div class="stat-value" id="totalSize">-</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">磁盘占用</div>
+          <div class="stat-value" id="diskUsage">-</div>
+        </div>
+        <div class="stat-item">
+          <div class="stat-label">服务端口</div>
+          <div class="stat-value" id="serverPort">-</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 配置管理 -->
+    <div class="card">
+      <h2>配置管理</h2>
+      <form id="configForm">
+        <div class="form-group">
+          <label>监听地址</label>
+          <input type="text" id="host" placeholder="0.0.0.0" />
+        </div>
+        <div class="form-group">
+          <label>服务端口</label>
+          <input type="number" id="port" placeholder="8080" />
+        </div>
+        <div class="form-group">
+          <label>上传目录</label>
+          <input type="text" id="uploadDir" placeholder="G:/ai_project/本地文件交互系统/uploads" />
+        </div>
+        <div class="form-group">
+          <label>最大文件大小（MB）</label>
+          <input type="number" id="maxFileSize" placeholder="1024" />
+        </div>
+        <div class="form-group">
+          <label>自动清理时间（小时）</label>
+          <input type="number" id="autoCleanHours" placeholder="24" />
+        </div>
+        <div class="btn-group">
+          <button type="submit" class="btn btn-primary">保存配置</button>
+          <button type="button" class="btn btn-danger" onclick="cleanupFiles()">清理过期文件</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- 文件管理 -->
+    <div class="card">
+      <h2>文件管理</h2>
+      <div class="btn-group" style="margin-bottom: 1rem;">
+        <button class="btn btn-danger" onclick="deleteSelected()">删除选中</button>
+      </div>
+      <div id="fileList" class="file-list">
+        <div class="loading">加载中...</div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 主题：默认白天，选择记在 localStorage（lanShareTheme）。
+    // 注意：管理后台与主页面端口不同、不同源，localStorage 不互通，两处各自记住自己的选择。
+    const THEME_KEY = 'lanShareTheme';
+
+    function readStoredTheme() {
+      try {
+        const stored = window.localStorage.getItem(THEME_KEY);
+        if (stored === 'dark' || stored === 'light') return stored;
+      } catch (error) {
+        // 隐私模式下 localStorage 不可用
+      }
+      return 'light';
+    }
+
+    function applyTheme(theme) {
+      const isDark = theme === 'dark';
+      document.documentElement.classList.toggle('dark', isDark);
+      document.documentElement.dataset.theme = isDark ? 'dark' : 'light';
+
+      const button = document.getElementById('themeToggle');
+      if (button) {
+        button.textContent = isDark ? '☀️ 白天' : '🌙 夜间';
+        button.title = isDark ? '切换到白天主题' : '切换到夜间主题';
+      }
+    }
+
+    let currentTheme = readStoredTheme();
+    applyTheme(currentTheme);
+
+    document.addEventListener('DOMContentLoaded', () => {
+      applyTheme(currentTheme);
+      document.getElementById('themeToggle').addEventListener('click', () => {
+        currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+        applyTheme(currentTheme);
+        try {
+          window.localStorage.setItem(THEME_KEY, currentTheme);
+        } catch (error) {
+          // 存不了不影响本次使用
+        }
+      });
+    });
+
+    // 用当前页面源而非硬编码 localhost：管理后台 API 与页面同源（都由 admin-server 伺服）。
+    // 若写死 localhost，用户用 http://127.0.0.1:13081 打开页面时，请求会跨源到 localhost，
+    // 因无 CORS 头被浏览器拦截，状态/配置/文件列表全部加载失败。
+    const API_BASE = window.location.origin;
+
+    // 格式化文件大小
+    function formatSize(bytes) {
+      if (bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
+    }
+
+    // 显示提示
+    function showAlert(message, type = 'success') {
+      const alert = document.getElementById('alert');
+      alert.className = `alert alert-${type} show`;
+      alert.textContent = message;
+      setTimeout(() => {
+        alert.classList.remove('show');
+      }, 3000);
+    }
+
+    // 转义 HTML，文件名等用户数据不能用 innerHTML 直接拼接
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      })[c]);
+    }
+
+    // 加载系统状态
+    async function loadStatus() {
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/status`);
+        const data = await res.json();
+
+        if (data.success) {
+          document.getElementById('fileCount').textContent = data.fileCount;
+          document.getElementById('totalSize').textContent = formatSize(data.totalSize);
+          document.getElementById('diskUsage').textContent = formatSize(data.diskUsage);
+          document.getElementById('serverPort').textContent = data.serverPort;
+        }
+      } catch (error) {
+        console.error('加载状态失败:', error);
+      }
+    }
+
+    // 加载配置
+    async function loadConfig() {
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/config`);
+        const data = await res.json();
+
+        if (data.success) {
+          document.getElementById('host').value = data.config.host;
+          document.getElementById('port').value = data.config.port;
+          document.getElementById('uploadDir').value = data.config.uploadDir;
+          document.getElementById('maxFileSize').value = Math.round(data.config.maxFileSize / 1024 / 1024);
+          document.getElementById('autoCleanHours').value = data.config.autoCleanHours;
+        }
+      } catch (error) {
+        console.error('加载配置失败:', error);
+      }
+    }
+
+    // 保存配置
+    document.getElementById('configForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+
+      const config = {
+        host: document.getElementById('host').value,
+        port: parseInt(document.getElementById('port').value),
+        uploadDir: document.getElementById('uploadDir').value,
+        maxFileSize: parseInt(document.getElementById('maxFileSize').value) * 1024 * 1024,
+        autoCleanHours: parseInt(document.getElementById('autoCleanHours').value)
+      };
+
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/config`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config)
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          showAlert(data.message || '配置已保存，需要重启服务器才能生效');
+          loadStatus();
+        } else {
+          showAlert(data.error || '保存失败', 'error');
+        }
+      } catch (error) {
+        showAlert('保存失败: ' + error.message, 'error');
+      }
+    });
+
+    // 加载文件列表
+    async function loadFiles() {
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/files`);
+        const data = await res.json();
+
+        const fileList = document.getElementById('fileList');
+        const files = Array.isArray(data) ? data : (data.files || []);
+
+        if (files.length > 0) {
+          fileList.innerHTML = files.map(file => `
+            <div class="file-item">
+              <div class="checkbox-group">
+                <input type="checkbox" class="file-checkbox" value="${escapeHtml(file.id)}">
+              </div>
+              <div class="file-info">
+                <div class="file-name">${escapeHtml(file.filename)}</div>
+                <div class="file-meta">${formatSize(file.size)} • ${new Date(file.upload_time).toLocaleString()}</div>
+              </div>
+            </div>
+          `).join('');
+        } else {
+          fileList.innerHTML = '<div class="loading">暂无文件</div>';
+        }
+      } catch (error) {
+        console.error('加载文件列表失败:', error);
+      }
+    }
+
+    // 删除选中文件
+    async function deleteSelected() {
+      const checkboxes = document.querySelectorAll('.file-checkbox:checked');
+      const fileIds = Array.from(checkboxes).map(cb => cb.value);
+
+      if (fileIds.length === 0) {
+        showAlert('请先选择要删除的文件', 'error');
+        return;
+      }
+
+      if (!confirm(`确定要删除 ${fileIds.length} 个文件吗？`)) {
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/files/delete-batch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ fileIds })
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          showAlert(data.message);
+          loadFiles();
+          loadStatus();
+        } else {
+          showAlert(data.error || '删除失败', 'error');
+        }
+      } catch (error) {
+        showAlert('删除失败: ' + error.message, 'error');
+      }
+    }
+
+    // 清理过期文件
+    async function cleanupFiles() {
+      if (!confirm('确定要清理所有过期文件吗？')) {
+        return;
+      }
+
+      try {
+        const res = await fetch(`${API_BASE}/api/admin/cleanup`, {
+          method: 'POST'
+        });
+
+        const data = await res.json();
+
+        if (data.success) {
+          showAlert(data.message);
+          loadFiles();
+          loadStatus();
+        } else {
+          showAlert(data.error || '清理失败', 'error');
+        }
+      } catch (error) {
+        showAlert('清理失败: ' + error.message, 'error');
+      }
+    }
+
+    // 初始化
+    loadStatus();
+    loadConfig();
+    loadFiles();
+
+    // 定时刷新状态
+    setInterval(loadStatus, 30000);
+  </script>
+</body>
+</html>
