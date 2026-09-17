@@ -21,6 +21,9 @@ server/database.db
 .doc/
 tmp/
 
+# 测试源码只在本地保留（仓库为纯源码发布，测试不上传；CI 已移除）
+.tests/
+
 # exe 构建产物与发布包
 dist-exe/
 release/

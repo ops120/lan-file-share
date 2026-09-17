@@ -5,12 +5,12 @@ import { defineConfig, devices } from '@playwright/test';
  * 支持多浏览器、多设备、失败重试、报告生成
  */
 export default defineConfig({
-  // 测试目录
-  testDir: './tests',
+  // 测试目录（本地 .tests/，不入库；发布包为纯源码）
+  testDir: './.tests',
 
   // 全量收尾：清理测试用例上传到真实 uploads 目录的测试文件
   // （含 100MB 级大文件用例，不做清理会逐轮累积）
-  globalTeardown: './tests/global-teardown.js',
+  globalTeardown: './.tests/global-teardown.js',
 
   // 全局超时设置
   timeout: 120000, // 单个测试 120 秒
