@@ -3,6 +3,9 @@ import { useStore } from './store';
 import { QRCodeSVG } from 'qrcode.react';
 import { readStoredTheme, applyTheme, storeTheme } from './theme';
 
+// 共享文件列表首批渲染条数：上限 5000 条一次性渲染在手机上会明显卡顿
+const SHARE_PAGE_SIZE = 200;
+
 function App() {
   const {
     files,
@@ -20,7 +23,13 @@ function App() {
     downloadFile,
     toggleFavorite,
     getQRCode,
-    getConnectQRCode
+    getConnectQRCode,
+    shares,
+    sharesError,
+    fetchShares,
+    addShare,
+    removeShare,
+    fetchShareFiles
   } = useStore();
 
   const [dragActive, setDragActive] = useState(false);
@@ -32,11 +41,25 @@ function App() {
   const [previewFile, setPreviewFile] = useState(null);
   const [selectedIP, setSelectedIP] = useState(null);
   const [theme, setTheme] = useState(readStoredTheme);
+  // 共享目录：新增表单与浏览弹窗
+  const [showAddShare, setShowAddShare] = useState(false);
+  const [sharePath, setSharePath] = useState('');
+  const [shareName, setShareName] = useState('');
+  const [addingShare, setAddingShare] = useState(false);
+  const [viewingShare, setViewingShare] = useState(null);
+  const [shareFiles, setShareFiles] = useState(null); // null = 加载中
+  const [shareFilesError, setShareFilesError] = useState(null);
+  const [shareVisibleCount, setShareVisibleCount] = useState(SHARE_PAGE_SIZE);
   const fileInputRef = useRef(null);
+  // 递增令牌：忽略已关闭/已切换的共享目录请求的迟到响应
+  const shareRequestRef = useRef(0);
+  const previewMediaRef = useRef(null);
+  const videoRef = useRef(null);
 
   useEffect(() => {
     fetchServerInfo();
     fetchFiles();
+    fetchShares();
     initWebSocket();
 
     // 卸载时断开连接，避免 StrictMode 双执行/热更新累积出多条连接与重连定时器
@@ -55,19 +78,26 @@ function App() {
     setTheme(current => (current === 'dark' ? 'light' : 'dark'));
   };
 
-  // 预览弹窗支持 Esc 关闭
+  // 预览 / 共享目录弹窗支持 Esc 关闭；
+  // 视频全屏时按 Esc 的第一下是退出全屏，不应顺手把弹窗也关掉
   useEffect(() => {
-    if (!previewFile) return undefined;
+    if (!previewFile && !viewingShare) return undefined;
 
     const onKeyDown = (event) => {
-      if (event.key === 'Escape') {
+      if (event.key !== 'Escape') return;
+      if (document.fullscreenElement || document.webkitFullscreenElement) return;
+
+      if (previewFile) {
         setPreviewFile(null);
+      } else if (viewingShare) {
+        shareRequestRef.current += 1;
+        setViewingShare(null);
       }
     };
 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [previewFile]);
+  }, [previewFile, viewingShare]);
 
   // 本机可能有多个网卡（有线/无线/虚拟网卡/VPN），不同设备能连通的网段不同，
   // 这里把可访问地址全部列出来，默认选中服务端推荐的那个，并记住使用者的选择。
@@ -193,6 +223,100 @@ function App() {
     setSelectedFileQR({ fileId, ...data });
   };
 
+  // 打开已上传文件的预览：previewUrl 供弹窗内的媒体标签使用
+  const openPreview = (file) => {
+    setPreviewFile({ ...file, previewUrl: `/api/preview/${file.id}` });
+  };
+
+  // 共享目录里的单个文件地址：mode=preview 内联播放，mode=download 作为附件下载
+  const shareFileUrl = (shareId, rel, mode) =>
+    `/api/shares/${shareId}/file?rel=${encodeURIComponent(rel)}&mode=${mode}`;
+
+  const openSharePreview = (entry) => {
+    if (!viewingShare) return;
+    setPreviewFile({
+      filename: entry.rel,
+      size: entry.size,
+      mime_type: entry.mime_type,
+      previewUrl: shareFileUrl(viewingShare.id, entry.rel, 'preview'),
+      downloadUrl: shareFileUrl(viewingShare.id, entry.rel, 'download')
+    });
+  };
+
+  const handleViewShare = async (share) => {
+    const token = ++shareRequestRef.current;
+    setViewingShare(share);
+    setShareFiles(null);
+    setShareFilesError(null);
+    setShareVisibleCount(SHARE_PAGE_SIZE);
+
+    const result = await fetchShareFiles(share.id);
+    // 期间用户已关闭弹窗或切换到另一个共享目录，丢弃这次的迟到响应
+    if (shareRequestRef.current !== token) return;
+
+    if (result.error) {
+      setShareFilesError(`加载失败：${result.error}`);
+    } else {
+      setShareFiles(result.data);
+    }
+  };
+
+  const closeShareModal = () => {
+    shareRequestRef.current += 1;
+    setViewingShare(null);
+  };
+
+  const handleAddShare = async (event) => {
+    event.preventDefault();
+    const trimmed = sharePath.trim();
+    if (!trimmed || addingShare) return;
+
+    setAddingShare(true);
+    const result = await addShare(trimmed, shareName.trim());
+    setAddingShare(false);
+
+    if (result.ok) {
+      setSharePath('');
+      setShareName('');
+      setShowAddShare(false);
+    } else {
+      alert(`添加失败：${result.error}`);
+    }
+  };
+
+  const handleRemoveShare = async (share) => {
+    if (!confirm(`把「${share.name}」从共享列表移除？（不会删除磁盘上的文件）`)) return;
+
+    const ok = await removeShare(share.id);
+    if (!ok) {
+      alert('移除失败，请稍后重试');
+    } else if (viewingShare && viewingShare.id === share.id) {
+      closeShareModal();
+    }
+  };
+
+  // 全屏播放：视频直接对 <video> 请求全屏（手机浏览器可直接进系统级全屏），
+  // 图片/PDF 等则对整个媒体容器全屏；iOS Safari 回退到 video.webkitEnterFullscreen
+  const handleFullscreen = async () => {
+    const kind = previewFile ? previewKind(previewFile) : null;
+    const element = kind === 'video' ? videoRef.current : previewMediaRef.current;
+    if (!element || document.fullscreenElement || document.webkitFullscreenElement) return;
+
+    try {
+      if (element.requestFullscreen) {
+        await element.requestFullscreen();
+      } else if (element.webkitRequestFullscreen) {
+        element.webkitRequestFullscreen();
+      } else if (typeof element.webkitEnterFullscreen === 'function') {
+        element.webkitEnterFullscreen();
+      } else {
+        alert('当前浏览器不支持全屏播放');
+      }
+    } catch (error) {
+      // 全屏请求可能被浏览器策略拒绝（如缺少用户手势），忽略即可
+    }
+  };
+
   const formatSize = (bytes) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -265,7 +389,8 @@ function App() {
       return null;
     }
 
-    const ext = (file?.filename || '').split('.').pop()?.toLowerCase() || '';
+    // 共享目录里的文件条目没有 filename，用相对路径 rel 兜底取扩展名
+    const ext = (file?.filename || file?.rel || '').split('.').pop()?.toLowerCase() || '';
     for (const [kind, extensions] of Object.entries(PREVIEW_EXTENSIONS)) {
       if (extensions.includes(ext)) return kind;
     }
@@ -437,6 +562,93 @@ function App() {
           </div>
         </section>
 
+        {/* Shared Dirs — 自定义共享目录 */}
+        <section className="bg-surface-2 rounded-3xl p-6 mb-8 border border-surface-4">
+          <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
+            <h2 className="text-lg font-semibold text-strong">共享目录（{shares.length}）</h2>
+            <button
+              onClick={() => setShowAddShare(v => !v)}
+              className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+            >
+              ＋ 添加共享目录
+            </button>
+          </div>
+          <p className="text-xs text-soft mb-4">
+            把本机文件夹共享给局域网内其他设备浏览、预览与下载（只读，不参与过期清理）
+          </p>
+
+          {showAddShare && (
+            <form onSubmit={handleAddShare} className="flex gap-2 flex-wrap mb-4">
+              <input
+                value={sharePath}
+                onChange={e => setSharePath(e.target.value)}
+                placeholder="文件夹绝对路径，例如 D:\\Videos 或 /data/share"
+                aria-label="文件夹绝对路径"
+                className="flex-1 min-w-[220px] bg-surface-3 border border-surface-4 focus:border-accent rounded-full px-4 py-2 text-sm text-body focus:outline-none placeholder:text-faint"
+              />
+              <input
+                value={shareName}
+                onChange={e => setShareName(e.target.value)}
+                placeholder="显示名称（可选）"
+                aria-label="显示名称（可选）"
+                className="w-full sm:w-44 bg-surface-3 border border-surface-4 focus:border-accent rounded-full px-4 py-2 text-sm text-body focus:outline-none placeholder:text-faint"
+              />
+              <button
+                type="submit"
+                disabled={addingShare || !sharePath.trim()}
+                className="px-6 py-2 bg-accent hover:bg-accent-muted disabled:opacity-50 disabled:cursor-not-allowed text-surface-1 rounded-full text-sm font-semibold transition-colors"
+              >
+                {addingShare ? '添加中…' : '添加'}
+              </button>
+            </form>
+          )}
+
+          {shares.length === 0 ? (
+            sharesError ? (
+              <p className="text-sm text-red-600 dark:text-red-400 py-2 text-center">⚠️ {sharesError}</p>
+            ) : (
+              <p className="text-sm text-soft py-2 text-center">暂无共享目录，点击右上角「添加共享目录」开放一个本机文件夹</p>
+            )
+          ) : (
+            <div className="space-y-2">
+              {shares.map(share => (
+                <div
+                  key={share.id}
+                  className="flex items-center gap-3 flex-wrap bg-surface-3 rounded-2xl px-4 py-3 border border-surface-4"
+                >
+                  <div className="text-2xl shrink-0">📂</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-strong truncate" title={share.name}>{share.name}</div>
+                    <div className="text-xs text-soft truncate" title={share.path}>{share.path}</div>
+                  </div>
+                  {!share.available && (
+                    <span
+                      title="目录不存在或已断开（如移动硬盘/网络盘未挂载），恢复后即可继续使用"
+                      className="text-xs px-2 py-1 rounded-full bg-red-500/10 text-red-600 dark:text-red-400 shrink-0"
+                    >
+                      目录不可用
+                    </span>
+                  )}
+                  <button
+                    onClick={() => handleViewShare(share)}
+                    disabled={!share.available}
+                    className="px-4 py-2 bg-surface-4 hover:bg-surface-5 disabled:opacity-50 disabled:cursor-not-allowed text-body rounded-full text-sm font-medium transition-colors"
+                  >
+                    查看
+                  </button>
+                  <button
+                    onClick={() => handleRemoveShare(share)}
+                    className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:bg-red-900/30 dark:hover:bg-red-900/50 dark:text-red-400 rounded-full text-sm font-medium transition-colors"
+                    title="仅从共享列表移除，不删除文件"
+                  >
+                    移除
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
         {/* File List */}
         {files.length > 0 && (
           <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
@@ -490,7 +702,7 @@ function App() {
                   <div className="flex-1 min-w-0">
                     {previewKind(file) ? (
                       <button
-                        onClick={() => setPreviewFile(file)}
+                        onClick={() => openPreview(file)}
                         title={`预览 ${file.filename}`}
                         className="font-medium text-strong truncate block max-w-full min-h-[36px] py-2 text-left hover:text-accent hover:underline transition-colors"
                       >
@@ -506,7 +718,7 @@ function App() {
                   <div className="flex gap-2 flex-wrap">
                     {previewKind(file) && (
                       <button
-                        onClick={() => setPreviewFile(file)}
+                        onClick={() => openPreview(file)}
                         className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
                       >
                         预览
@@ -641,6 +853,140 @@ function App() {
         </div>
       )}
 
+      {/* 共享目录文件浏览弹窗 */}
+      {viewingShare && (
+        <div
+          className="fixed inset-0 bg-overlay flex items-center justify-center p-4 z-50"
+          onClick={closeShareModal}
+        >
+          <div
+            className="bg-surface-2 rounded-3xl p-5 md:p-6 w-full max-w-3xl max-h-[85vh] flex flex-col border border-surface-4"
+            onClick={e => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="共享目录文件"
+          >
+            <div className="flex items-start justify-between gap-4 mb-4">
+              <div className="min-w-0">
+                <h3 className="text-base md:text-lg font-semibold text-strong truncate" title={viewingShare.name}>
+                  📂 {viewingShare.name}
+                </h3>
+                <div className="text-xs text-soft truncate mt-1" title={viewingShare.path}>
+                  {viewingShare.path}
+                </div>
+              </div>
+              <div className="flex gap-2 shrink-0">
+                <button
+                  onClick={() => handleViewShare(viewingShare)}
+                  disabled={shareFiles === null && !shareFilesError}
+                  aria-label="刷新文件列表"
+                  title="刷新文件列表"
+                  className="w-9 h-9 rounded-full bg-surface-4 hover:bg-surface-5 disabled:opacity-50 disabled:cursor-not-allowed text-body transition-colors"
+                >
+                  ⟳
+                </button>
+                <button
+                  onClick={closeShareModal}
+                  aria-label="关闭"
+                  title="关闭（Esc）"
+                  className="w-9 h-9 rounded-full bg-surface-4 hover:bg-surface-5 text-body transition-colors"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto min-h-[160px] space-y-2">
+              {shareFilesError && (
+                <div className="text-center py-10 text-soft">
+                  <div className="text-4xl mb-3">⚠️</div>
+                  <p>{shareFilesError}</p>
+                </div>
+              )}
+
+              {!shareFilesError && shareFiles === null && (
+                <div className="text-center py-10 text-soft">
+                  <div className="text-4xl mb-3">⏳</div>
+                  <p>正在读取目录…</p>
+                </div>
+              )}
+
+              {!shareFilesError && shareFiles && shareFiles.files.length === 0 && (
+                <div className="text-center py-10 text-soft">
+                  <div className="text-4xl mb-3">📭</div>
+                  <p>目录里没有文件</p>
+                </div>
+              )}
+
+              {!shareFilesError && shareFiles && shareFiles.files.slice(0, shareVisibleCount).map(entry => (
+                <div
+                  key={entry.rel}
+                  className="flex items-center gap-3 flex-wrap bg-surface-3 rounded-xl px-3 py-2.5 border border-surface-4"
+                >
+                  <div className="text-2xl shrink-0">{getFileIcon(entry.mime_type)}</div>
+                  <div className="flex-1 min-w-0">
+                    {previewKind(entry) ? (
+                      <button
+                        onClick={() => openSharePreview(entry)}
+                        title={`预览 ${entry.rel}`}
+                        className="text-sm font-medium text-strong truncate block max-w-full text-left hover:text-accent hover:underline transition-colors"
+                      >
+                        {entry.name}
+                      </button>
+                    ) : (
+                      <div className="text-sm font-medium text-strong truncate" title={entry.rel}>
+                        {entry.name}
+                      </div>
+                    )}
+                    <div className="text-xs text-soft truncate">
+                      {entry.rel.includes('/')
+                        ? `${entry.rel.slice(0, entry.rel.lastIndexOf('/'))} · `
+                        : ''}
+                      {formatSize(entry.size)} · {formatTime(entry.mtime)}
+                    </div>
+                  </div>
+                  {previewKind(entry) && (
+                    <button
+                      onClick={() => openSharePreview(entry)}
+                      className="shrink-0 px-3 py-1.5 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-xs font-medium transition-colors"
+                    >
+                      预览
+                    </button>
+                  )}
+                  <button
+                    onClick={() => window.open(shareFileUrl(viewingShare.id, entry.rel, 'download'), '_blank')}
+                    className="shrink-0 px-3 py-1.5 bg-accent hover:bg-accent-muted text-surface-1 rounded-full text-xs font-semibold transition-colors"
+                  >
+                    下载
+                  </button>
+                </div>
+              ))}
+
+              {shareFiles && shareFiles.files.length > shareVisibleCount && (
+                <button
+                  onClick={() => setShareVisibleCount(count => count + SHARE_PAGE_SIZE)}
+                  className="w-full py-2.5 text-sm text-accent hover:underline"
+                >
+                  加载更多（还有 {(shareFiles.files.length - shareVisibleCount).toLocaleString()} 个文件）
+                </button>
+              )}
+
+              {shareFiles && shareFiles.truncated && (
+                <p className="text-center text-xs text-faint pt-2">
+                  文件太多，仅显示前 {shareFiles.files.length} 个
+                </p>
+              )}
+
+              {shareFiles && shareFiles.depthTruncated && (
+                <p className="text-center text-xs text-faint pt-2">
+                  目录层级过深，仅显示前 12 层的内容
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 在线预览弹窗（视频/图片/音频/PDF） */}
       {previewFile && (
         <div
@@ -648,14 +994,18 @@ function App() {
           onClick={() => setPreviewFile(null)}
         >
           <div
-            className="bg-surface-2 rounded-3xl p-5 md:p-6 w-full max-w-4xl border border-surface-4"
+            className="bg-surface-2 rounded-3xl p-5 md:p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto border border-surface-4"
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-label="文件预览"
           >
             <div className="flex items-start justify-between gap-4 mb-4">
-              <h3 className="text-base md:text-lg font-semibold text-strong break-all" data-testid="preview-title">
+              <h3
+                className="text-base md:text-lg font-semibold text-strong break-all line-clamp-2"
+                data-testid="preview-title"
+                title={previewFile.filename}
+              >
                 {previewFile.filename}
               </h3>
               <button
@@ -668,23 +1018,27 @@ function App() {
               </button>
             </div>
 
-            <div className="bg-overlay rounded-2xl overflow-hidden flex items-center justify-center min-h-[200px]">
+            <div
+              ref={previewMediaRef}
+              className="bg-overlay rounded-2xl overflow-hidden flex items-center justify-center min-h-[200px]"
+            >
               {previewKind(previewFile) === 'video' && (
                 <video
-                  src={`/api/preview/${previewFile.id}`}
+                  ref={videoRef}
+                  src={previewFile.previewUrl}
                   controls
                   autoPlay
                   playsInline
                   className="w-full max-h-[70vh] bg-black"
                 >
                   您的浏览器不支持视频播放，请
-                  <a href={`/api/preview/${previewFile.id}`}>点此打开</a>
+                  <a href={previewFile.previewUrl}>点此打开</a>
                 </video>
               )}
 
               {previewKind(previewFile) === 'image' && (
                 <img
-                  src={`/api/preview/${previewFile.id}`}
+                  src={previewFile.previewUrl}
                   alt={previewFile.filename}
                   className="max-h-[70vh] max-w-full object-contain"
                 />
@@ -693,13 +1047,13 @@ function App() {
               {previewKind(previewFile) === 'audio' && (
                 <div className="w-full p-8">
                   <div className="text-5xl text-center mb-6">🎵</div>
-                  <audio src={`/api/preview/${previewFile.id}`} controls autoPlay className="w-full" />
+                  <audio src={previewFile.previewUrl} controls autoPlay className="w-full" />
                 </div>
               )}
 
               {previewKind(previewFile) === 'pdf' && (
                 <iframe
-                  src={`/api/preview/${previewFile.id}`}
+                  src={previewFile.previewUrl}
                   title={previewFile.filename}
                   className="w-full h-[70vh] bg-white"
                 />
@@ -718,8 +1072,17 @@ function App() {
                 {formatSize(previewFile.size)} · {previewFile.mime_type || '未知类型'}
               </span>
               <div className="flex gap-2">
+                {['video', 'image', 'pdf'].includes(previewKind(previewFile)) && (
+                  <button
+                    onClick={handleFullscreen}
+                    title="全屏查看（Esc 退出）"
+                    className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+                  >
+                    ⛶ 全屏
+                  </button>
+                )}
                 <a
-                  href={`/api/preview/${previewFile.id}`}
+                  href={previewFile.previewUrl}
                   target="_blank"
                   rel="noreferrer"
                   className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
@@ -727,7 +1090,14 @@ function App() {
                   在新窗口打开
                 </a>
                 <button
-                  onClick={() => downloadFile(previewFile.id)}
+                  onClick={() => {
+                    // 共享目录里的文件没有入库 id，用后端给的下载地址；上传文件仍走 downloadFile
+                    if (previewFile.downloadUrl) {
+                      window.open(previewFile.downloadUrl, '_blank');
+                    } else {
+                      downloadFile(previewFile.id);
+                    }
+                  }}
                   className="px-4 py-2 bg-accent hover:bg-accent-muted text-surface-1 rounded-full text-sm font-semibold transition-colors"
                 >
                   下载

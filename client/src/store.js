@@ -16,6 +16,8 @@ function describeUploadTarget(list) {
 
 export const useStore = create((set, get) => ({
   files: [],
+  shares: [],
+  sharesError: null,
   serverInfo: null,
   uploading: false,
   uploadProgress: null,
@@ -66,6 +68,9 @@ export const useStore = create((set, get) => ({
             f.id === data.fileId ? { ...f, is_favorite: data.isFavorite ? 1 : 0 } : f
           )
         }));
+      } else if (data.type === 'shares_updated') {
+        // 其它页面添加了共享目录时，本页同步刷新共享列表
+        get().fetchShares();
       }
     };
 
@@ -349,6 +354,91 @@ export const useStore = create((set, get) => ({
     } catch (err) {
       console.error('Failed to get connect QR code:', err);
       return null;
+    }
+  },
+
+  // ===== 自定义共享目录 =====
+
+  // 300ms 尾沿去抖：shares_updated 广播与手动刷新、添加/移除后的主动刷新
+  // 会挤在同一瞬间，合并成一次请求；返回共享 Promise，调用方 await 拿到的是同一次结果
+  sharesFetchTimer: null,
+  sharesFetchPromise: null,
+
+  fetchShares: () => {
+    if (get().sharesFetchPromise) {
+      return get().sharesFetchPromise;
+    }
+
+    const promise = new Promise(resolve => {
+      set({ sharesFetchTimer: setTimeout(resolve, 300) });
+    }).then(async () => {
+      set({ sharesFetchPromise: null, sharesFetchTimer: null });
+      try {
+        const res = await fetch(`${API_BASE}/shares`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        set({ shares: Array.isArray(data) ? data : [], sharesError: null });
+      } catch (err) {
+        console.error('Failed to fetch shares:', err);
+        set({ sharesError: '加载共享目录失败，请检查服务后重试' });
+      }
+    });
+
+    set({ sharesFetchPromise: promise });
+    return promise;
+  },
+
+  // 添加共享目录；name 留空时服务端用目录名作为显示名
+  addShare: async (sharePath, shareName) => {
+    try {
+      const res = await fetch(`${API_BASE}/shares`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: sharePath, name: shareName || undefined })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        return { ok: false, error: (data && data.error) || `HTTP ${res.status}` };
+      }
+      await get().fetchShares();
+      return { ok: true };
+    } catch (err) {
+      console.error('Failed to add share:', err);
+      return { ok: false, error: '网络错误，请稍后重试' };
+    }
+  },
+
+  // 移除共享（只断开引用，不删除磁盘文件）
+  removeShare: async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/shares/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        await get().fetchShares();
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error('Failed to remove share:', err);
+      return false;
+    }
+  },
+
+  // 返回 { data } 或 { error }：服务端区分的「目录不存在/不可访问」等原因透传给 UI
+  fetchShareFiles: async (id) => {
+    try {
+      const res = await fetch(`${API_BASE}/shares/${id}/files`);
+      const payload = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        return { error: (payload && payload.error) || `HTTP ${res.status}` };
+      }
+      if (!payload || !Array.isArray(payload.files)) {
+        return { error: '响应格式异常' };
+      }
+      return { data: payload };
+    } catch (err) {
+      console.error('Failed to fetch share files:', err);
+      return { error: '网络错误，请稍后重试' };
     }
   }
 }));

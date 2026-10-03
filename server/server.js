@@ -31,7 +31,9 @@ let CONFIG = {
   port: 8080,
   uploadDir: DEFAULT_UPLOAD_DIR,
   maxFileSize: 1024 * 1024 * 1024, // 1GB
-  autoCleanHours: 24
+  autoCleanHours: 24,
+  // 自定义共享目录：[{ id, name, path, addedAt }]，在网页上添加或直接写配置文件
+  sharedDirs: []
 };
 
 if (fs.existsSync(CONFIG_FILE)) {
@@ -41,6 +43,33 @@ if (fs.existsSync(CONFIG_FILE)) {
   } catch (error) {
     console.warn('⚠️  加载配置文件失败，使用默认配置');
   }
+}
+
+// 共享目录配置可能被手改坏（不是数组、条目缺字段），逐项收敛成合法结构再使用
+if (!Array.isArray(CONFIG.sharedDirs)) {
+  CONFIG.sharedDirs = [];
+}
+// 必须是绝对路径：相对路径会跟着启动目录漂移，exe 换台机器就可能指向错误位置
+// 同时按解析后路径（Windows 下折叠大小写）去重，避免手改配置留下同一目录的多份写法
+{
+  const seenShareKeys = new Set();
+  CONFIG.sharedDirs = CONFIG.sharedDirs
+    .filter(share => share && typeof share.path === 'string' && share.path.trim()
+      && path.isAbsolute(share.path.trim()))
+    .filter(share => {
+      const key = shareKeyOf(path.resolve(share.path.trim()));
+      if (seenShareKeys.has(key)) return false;
+      seenShareKeys.add(key);
+      return true;
+    })
+    .map(share => ({
+      id: typeof share.id === 'string' && share.id ? share.id : nanoid(10),
+      name: typeof share.name === 'string' && share.name.trim()
+        ? share.name.trim()
+        : (path.basename(share.path.trim()) || share.path.trim()),
+      path: share.path.trim(),
+      addedAt: Number(share.addedAt) || Date.now()
+    }));
 }
 
 const app = express();
@@ -315,6 +344,8 @@ function isOwnOrigin(origin) {
   if (!origin) return true; // 同源浏览器导航 / 非浏览器客户端（curl、Playwright request fixture）
   try {
     const { hostname, port } = new URL(origin);
+    // PORT+1 是给管理后台预留的放行：后台页面如需直连主服务写接口时不会被同源校验拦截。
+    // 当前后台全部经 admin-server 服务端转发、没有直连调用方，属预留宽放行（如需收紧只保留 PORT）。
     if (port && port !== String(PORT) && port !== String(PORT + 1)) return false;
     if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1') return true;
     return getAllLocalIPs().some(item => item.ip === hostname);
@@ -511,18 +542,22 @@ app.post('/api/upload', upload.array('files', 50), (req, res) => {
 });
 
 /**
- * 按需把文件流式发给客户端，支持 HTTP Range（下载断点续传与视频拖动进度都依赖它）。
+ * 按需把磁盘上的任意文件流式发给客户端，支持 HTTP Range（下载断点续传与视频拖动进度都依赖它）。
  * disposition 为 attachment 时是下载，为 inline 时供浏览器内联播放/预览。
+ * knownStat：调用方已 stat 过时传入，省去重复的 existsSync/statSync（网络盘上是实打实的 RTT）。
  */
-function streamStoredFile(req, res, file, disposition = 'attachment') {
-  const filePath = path.join(UPLOAD_DIR, file.storage_path);
+function streamFileAt(req, res, filePath, filename, mimeType, disposition = 'attachment', knownStat = null) {
+  let stat = knownStat;
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File not found on disk' });
+  if (!stat) {
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found on disk' });
+    }
+    stat = fs.statSync(filePath);
   }
 
-  const fileSize = fs.statSync(filePath).size;
-  const contentType = file.mime_type || 'application/octet-stream';
+  const fileSize = stat.size;
+  const contentType = mimeType || 'application/octet-stream';
   const range = req.headers.range;
 
   const baseHeaders = {
@@ -530,8 +565,14 @@ function streamStoredFile(req, res, file, disposition = 'attachment') {
     'Accept-Ranges': 'bytes',
     // 禁止浏览器嗅探类型：避免把伪装成文本的上传文件当 HTML 执行
     'X-Content-Type-Options': 'nosniff',
-    'Content-Disposition': contentDisposition(file.filename, disposition)
+    'Content-Disposition': contentDisposition(filename, disposition)
   };
+
+  // 内联交付的 HTML/SVG 会在本应用同源执行脚本（可调用全部 API），沙箱化禁掉脚本；
+  // 视频/图片/PDF 的内联播放不依赖脚本，不受影响
+  if (disposition === 'inline' && /^(text\/html|image\/svg)/.test(contentType)) {
+    baseHeaders['Content-Security-Policy'] = 'sandbox';
+  }
 
   const sendFile = (status, headers, streamOptions) => {
     res.writeHead(status, headers);
@@ -585,6 +626,18 @@ function streamStoredFile(req, res, file, disposition = 'attachment') {
 
   // 完整内容
   sendFile(200, { ...baseHeaders, 'Content-Length': fileSize });
+}
+
+/** 上传目录内的文件：拼好绝对路径后交给 streamFileAt */
+function streamStoredFile(req, res, file, disposition = 'attachment') {
+  return streamFileAt(
+    req,
+    res,
+    path.join(UPLOAD_DIR, file.storage_path),
+    file.filename,
+    file.mime_type,
+    disposition
+  );
 }
 
 // 按 id 取文件记录（排除已删除）
@@ -1007,6 +1060,314 @@ app.get('/api/connect-qrcode', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to generate QR code' });
   }
+});
+
+// ==================== 自定义共享目录 ====================
+// 使用者可把本机的任意文件夹开放给局域网客户端浏览/下载（只读，不入库、不参与过期清理）。
+// 共享列表持久化在 config.json 的 sharedDirs 字段；手动编辑该字段同样在重启后生效。
+
+/** 把当前共享列表写回 config.json（保留文件里的其它字段，只更新 sharedDirs） */
+function persistSharedDirs() {
+  try {
+    let raw = {};
+    if (fs.existsSync(CONFIG_FILE)) {
+      raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
+    }
+    raw.sharedDirs = CONFIG.sharedDirs;
+    // 先写临时文件再原子替换：写一半被中断（断电/崩溃）不会留下损坏的 config.json，
+    // 否则重启后端口、上传目录、全部共享都会静默退回默认值
+    const tmpFile = `${CONFIG_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(raw, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, CONFIG_FILE);
+  } catch (error) {
+    console.warn('共享目录配置保存失败:', error.message);
+  }
+}
+
+function findShare(id) {
+  return CONFIG.sharedDirs.find(share => share.id === id) || null;
+}
+
+/** 共享根必须是真实存在的目录；返回 realpath 结果，供后续包含性校验用 */
+function resolveShareRoot(share) {
+  try {
+    const real = fs.realpathSync(share.path);
+    return fs.statSync(real).isDirectory() ? real : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/** target 是否位于 root 之内（Windows 下路径大小写不敏感） */
+function isWithin(root, target) {
+  const a = process.platform === 'win32' ? root.toLowerCase() : root;
+  const b = process.platform === 'win32' ? target.toLowerCase() : target;
+  if (b === a) return true;
+  const prefix = a.endsWith(path.sep) ? a : a + path.sep;
+  return b.startsWith(prefix);
+}
+
+/**
+ * 把相对路径安全地拼到共享根之下：
+ * 拒绝 .. 穿越、盘符段、绝对化后逃出根目录的情况，并用 realpath 阻止符号链接逃逸。
+ */
+function resolveShareFilePath(root, rel) {
+  if (typeof rel !== 'string' || rel.includes('\0')) return null;
+
+  const segments = rel.replace(/\\/g, '/').split('/')
+    .filter(seg => seg !== '' && seg !== '.');
+
+  if (segments.some(seg => seg === '..' || /^[a-zA-Z]:$/.test(seg))) {
+    return null;
+  }
+
+  const abs = path.resolve(root, ...segments);
+  if (!isWithin(root, abs)) return null;
+
+  try {
+    const real = fs.realpathSync(abs);
+    const realRoot = fs.realpathSync(root);
+    return isWithin(realRoot, real) ? real : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+// 递归列出共享目录内的全部文件（返回相对路径），带数量、目录数与层级上限：
+// 数量上限只约束返回条数，目录密集树（数千个空目录）还要靠目录数上限兜住扫描工作量
+const SHARE_MAX_FILES = 5000;
+const SHARE_MAX_DIRS = 2000;
+const SHARE_MAX_DEPTH = 12;
+
+app.get('/api/shares/:id/files', async (req, res) => {
+  const share = findShare(req.params.id);
+  if (!share) {
+    return res.status(404).json({ error: '共享目录不存在' });
+  }
+
+  const root = resolveShareRoot(share);
+  if (!root) {
+    return res.status(404).json({ error: '共享目录不存在或不可访问' });
+  }
+
+  const files = [];
+  let truncated = false;
+  let depthTruncated = false;
+  let dirCount = 0;
+
+  // 全程用 fs.promises 并在每个目录处理完让出事件循环：
+  // 共享可能指向网络盘/移动硬盘，同步 statSync 一卡就是整个服务停摆（心跳、拖进度全冻结）
+  const walk = async (dir, relPrefix, depth) => {
+    if (truncated) return;
+
+    let entries;
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+
+    for (const entry of entries) {
+      if (truncated) return;
+      // 跳过隐藏文件/目录（以 . 开头）；符号链接一律不跟，避免穿越共享边界
+      if (entry.name.startsWith('.') || entry.isSymbolicLink()) {
+        continue;
+      }
+
+      const abs = path.join(dir, entry.name);
+      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+
+      if (entry.isDirectory()) {
+        if (depth >= SHARE_MAX_DEPTH) {
+          depthTruncated = true;
+          continue;
+        }
+        dirCount++;
+        if (dirCount > SHARE_MAX_DIRS) {
+          truncated = true;
+          return;
+        }
+        await walk(abs, rel, depth + 1);
+        // 每个子目录处理完让出一个事件循环 tick，慢盘扫描不再阻塞其它请求
+        await new Promise(resolve => setImmediate(resolve));
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      if (files.length >= SHARE_MAX_FILES) {
+        truncated = true;
+        return;
+      }
+
+      let stat;
+      try {
+        stat = await fs.promises.stat(abs);
+      } catch (error) {
+        continue;
+      }
+
+      files.push({
+        rel,
+        name: entry.name,
+        size: stat.size,
+        mtime: Math.round(stat.mtimeMs),
+        mime_type: lookupMimeType(entry.name)
+      });
+    }
+  };
+
+  await walk(root, '', 1);
+
+  res.json({
+    id: share.id,
+    name: share.name,
+    path: share.path,
+    truncated,
+    depthTruncated,
+    files
+  });
+});
+
+// 共享目录里的单个文件：mode=download 时作为附件下载，否则内联预览（同样支持 Range）
+app.get('/api/shares/:id/file', (req, res) => {
+  const share = findShare(req.params.id);
+  if (!share) {
+    return res.status(404).json({ error: '共享目录不存在' });
+  }
+
+  const root = resolveShareRoot(share);
+  if (!root) {
+    return res.status(404).json({ error: '共享目录不存在或不可访问' });
+  }
+
+  const target = resolveShareFilePath(root, req.query.rel);
+  if (!target) {
+    return res.status(404).json({ error: '文件不存在' });
+  }
+
+  let stat;
+  try {
+    stat = fs.statSync(target);
+  } catch (error) {
+    return res.status(404).json({ error: '文件不存在' });
+  }
+  if (!stat.isFile()) {
+    return res.status(404).json({ error: '目标不是文件' });
+  }
+
+  const filename = path.basename(target);
+  const disposition = req.query.mode === 'download' ? 'attachment' : 'inline';
+  // stat 已在上面取过，传给 streamFileAt 免去重复 existsSync/statSync（网络盘上每次 seek 都省一轮 RTT）
+  return streamFileAt(req, res, target, filename, lookupMimeType(filename), disposition, stat);
+});
+
+// available 探测（realpath+stat）结果短 TTL 缓存：列表页每次渲染、WS 广播后的批量刷新
+// 都会打到这里，共享指向断开的网络盘时同步探测可能秒级阻塞
+const SHARE_AVAIL_TTL_MS = 5000;
+const shareAvailabilityCache = new Map(); // id -> { available, checkedAt }
+
+function shareAvailable(share) {
+  const cached = shareAvailabilityCache.get(share.id);
+  const now = Date.now();
+  if (cached && now - cached.checkedAt < SHARE_AVAIL_TTL_MS) {
+    return cached.available;
+  }
+  const available = resolveShareRoot(share) !== null;
+  shareAvailabilityCache.set(share.id, { available, checkedAt: now });
+  return available;
+}
+
+// 共享目录列表
+app.get('/api/shares', (req, res) => {
+  res.json(CONFIG.sharedDirs.map(share => ({
+    id: share.id,
+    name: share.name,
+    path: share.path,
+    available: shareAvailable(share)
+  })));
+});
+
+// 共享条目数量上限：防止脚本循环添加撑爆 config.json（每条都要同步 realpath 探测）
+const SHARE_MAX_COUNT = 50;
+const SHARE_MAX_NAME_LENGTH = 100;
+
+// 去重键：realpath 结果按平台折叠大小写（Windows 下 D:\Videos 与 d:\videos\ 是同一目录）。
+// 函数声明而非 const 箭头：顶部的启动收敛段也会调用它，需要函数提升
+function shareKeyOf(realPath) {
+  return process.platform === 'win32' ? realPath.toLowerCase() : realPath;
+}
+
+// 数据目录自保：这些目录的清单会暴露 config.json / database.db 本身，拒绝被共享
+const SHARE_PROTECTED_KEYS = [APP_ROOT, DATA_DIR, UPLOAD_DIR].map(p => shareKeyOf(path.resolve(p)));
+
+// 添加共享目录：必须是已存在的绝对路径目录；只加引用，不复制/移动任何文件
+app.post('/api/shares', (req, res) => {
+  const rawPath = typeof req.body?.path === 'string' ? req.body.path.trim() : '';
+  const rawName = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+
+  if (!rawPath || rawPath.includes('\0')) {
+    return res.status(400).json({ error: '请填写目录路径' });
+  }
+  if (rawPath.length > 500) {
+    return res.status(400).json({ error: '路径过长（上限 500 字符）' });
+  }
+  if (!path.isAbsolute(rawPath)) {
+    return res.status(400).json({ error: '请填写绝对路径，例如 D:\\Videos 或 /data/share' });
+  }
+
+  let real;
+  try {
+    real = fs.realpathSync(rawPath);
+    if (!fs.statSync(real).isDirectory()) {
+      throw new Error('not a directory');
+    }
+  } catch (error) {
+    return res.status(400).json({ error: '路径不存在或不是文件夹' });
+  }
+
+  if (SHARE_PROTECTED_KEYS.includes(shareKeyOf(real))) {
+    return res.status(400).json({ error: '该目录是服务数据目录（含配置与数据库），不能共享' });
+  }
+
+  // 按 realpath（而非原始输入串）去重：大小写、尾斜杠、junction 指向同一处时视为重复
+  const realKey = shareKeyOf(real);
+  if (CONFIG.sharedDirs.some(share => shareKeyOf(path.resolve(share.path)) === realKey)) {
+    return res.status(409).json({ error: '该目录已在共享列表中' });
+  }
+  if (CONFIG.sharedDirs.length >= SHARE_MAX_COUNT) {
+    return res.status(400).json({ error: `共享目录数量已达上限（${SHARE_MAX_COUNT} 个）` });
+  }
+
+  const share = {
+    id: nanoid(10),
+    name: (rawName || path.basename(real) || rawPath).slice(0, SHARE_MAX_NAME_LENGTH),
+    path: rawPath,
+    addedAt: Date.now()
+  };
+  CONFIG.sharedDirs.push(share);
+  persistSharedDirs();
+
+  // 先应答再广播：发起方随后自己会刷新，广播提前发会让它重复拉一次列表
+  res.json({ success: true, share: { id: share.id, name: share.name, path: share.path, available: true } });
+  broadcast({ type: 'shares_updated' });
+});
+
+// 移除共享：仅从列表移除，不删除磁盘上的任何文件
+app.delete('/api/shares/:id', (req, res) => {
+  const index = CONFIG.sharedDirs.findIndex(share => share.id === req.params.id);
+  if (index === -1) {
+    return res.status(404).json({ error: '共享目录不存在' });
+  }
+
+  const [removed] = CONFIG.sharedDirs.splice(index, 1);
+  shareAvailabilityCache.delete(removed.id);
+  persistSharedDirs();
+
+  res.json({ success: true, id: removed.id });
+  broadcast({ type: 'shares_updated' });
 });
 
 // 下载页面（移动端扫码直接下载）

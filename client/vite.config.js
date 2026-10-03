@@ -28,6 +28,10 @@ const proxy = {
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // 显式清空输出目录：否则历史 hash 资产会残留，被 build:exe 全量打进 exe
+    emptyOutDir: true
+  },
   server: {
     port: 3000,
     proxy
