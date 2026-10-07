@@ -1151,6 +1151,7 @@ app.get('/api/shares/:id/files', async (req, res) => {
   }
 
   const files = [];
+  const dirs = [];
   let truncated = false;
   let depthTruncated = false;
   let dirCount = 0;
@@ -1188,6 +1189,8 @@ app.get('/api/shares/:id/files', async (req, res) => {
           truncated = true;
           return;
         }
+        // 记录目录本身（含空目录），前端按原目录层级做树形浏览
+        dirs.push(rel);
         await walk(abs, rel, depth + 1);
         // 每个子目录处理完让出一个事件循环 tick，慢盘扫描不再阻塞其它请求
         await new Promise(resolve => setImmediate(resolve));
@@ -1227,6 +1230,7 @@ app.get('/api/shares/:id/files', async (req, res) => {
     path: share.path,
     truncated,
     depthTruncated,
+    dirs,
     files
   });
 });

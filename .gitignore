@@ -17,6 +17,10 @@ uploads/
 data/
 server/database.db
 
+# 本地配置（config.json 会被服务运行时改写（如共享目录列表），可能含本机个人路径，
+# 只保留 config.example.json 模板入库；复制一份命名为 config.json 即可使用）
+config.json
+
 # 本地文档与临时文件（只在本地保留，不纳入版本库）
 .doc/
 tmp/

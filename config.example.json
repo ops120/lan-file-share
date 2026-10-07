@@ -3,5 +3,6 @@
   "port": 13080,
   "uploadDir": "./uploads",
   "maxFileSize": 1073741824,
-  "autoCleanHours": 24
+  "autoCleanHours": 24,
+  "sharedDirs": []
 }

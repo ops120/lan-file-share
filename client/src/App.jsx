@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { useStore } from './store';
 import { QRCodeSVG } from 'qrcode.react';
 import { readStoredTheme, applyTheme, storeTheme } from './theme';
@@ -50,6 +50,9 @@ function App() {
   const [shareFiles, setShareFiles] = useState(null); // null = 加载中
   const [shareFilesError, setShareFilesError] = useState(null);
   const [shareVisibleCount, setShareVisibleCount] = useState(SHARE_PAGE_SIZE);
+  // 目录层级浏览：当前所在子目录（'' = 共享根）；搜索优先于层级浏览
+  const [shareCwd, setShareCwd] = useState('');
+  const [shareSearch, setShareSearch] = useState('');
   const fileInputRef = useRef(null);
   // 递增令牌：忽略已关闭/已切换的共享目录请求的迟到响应
   const shareRequestRef = useRef(0);
@@ -249,6 +252,8 @@ function App() {
     setShareFiles(null);
     setShareFilesError(null);
     setShareVisibleCount(SHARE_PAGE_SIZE);
+    setShareCwd('');
+    setShareSearch('');
 
     const result = await fetchShareFiles(share.id);
     // 期间用户已关闭弹窗或切换到另一个共享目录，丢弃这次的迟到响应
@@ -397,6 +402,70 @@ function App() {
     return null;
   };
 
+  // ===== 共享目录：按原目录层级浏览 + 搜索 =====
+  // 由扁平的 files/dirs 列表构建成"目录 -> 直接子项"的层级索引，
+  // 浏览时只渲染当前层级的目录与文件（目录在前、按名称排序），更接近文件管理器的体验
+  const shareTree = useMemo(() => {
+    if (!shareFiles) return null;
+
+    // dirRel -> { name, rel, children: {dirs: [], files: []} }；根用 '' 表示
+    const nodes = new Map([['', { name: '', rel: '', dirs: [], files: [] }]]);
+    const ensureDir = (rel) => {
+      if (nodes.has(rel)) return nodes.get(rel);
+      const parent = rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '';
+      const node = { name: rel.slice(rel.lastIndexOf('/') + 1), rel, dirs: [], files: [] };
+      nodes.set(rel, node);
+      const parentNode = ensureDir(parent);
+      parentNode.dirs.push(node);
+      return node;
+    };
+
+    (shareFiles.dirs || []).forEach(rel => ensureDir(rel));
+    (shareFiles.files || []).forEach(file => {
+      const parent = file.rel.includes('/') ? file.rel.slice(0, file.rel.lastIndexOf('/')) : '';
+      ensureDir(parent).files.push(file);
+    });
+
+    // 每层排序：目录在前，各自按名称（zh-CN 排序与服务端一致）
+    const compare = (a, b) => a.name.localeCompare(b.name, 'zh-CN');
+    nodes.forEach(node => {
+      node.dirs.sort(compare);
+      node.files.sort((a, b) => compare({ name: a.name }, { name: b.name }));
+    });
+
+    return nodes;
+  }, [shareFiles]);
+
+  // 当前层级内容；搜索时改为全量匹配（文件名 + 相对路径）
+  const shareLevel = useMemo(() => {
+    if (!shareFiles) return { dirs: [], files: [] };
+
+    const query = shareSearch.trim().toLowerCase();
+    if (query) {
+      return {
+        dirs: [],
+        files: shareFiles.files.filter(file =>
+          file.name.toLowerCase().includes(query) || file.rel.toLowerCase().includes(query)
+        )
+      };
+    }
+
+    const node = shareTree?.get(shareCwd);
+    return node ? { dirs: node.dirs, files: node.files } : { dirs: [], files: [] };
+  }, [shareFiles, shareTree, shareCwd, shareSearch]);
+
+  // 面包屑：['', 'a', 'b']（点击任意段直接跳转）
+  const shareCrumbs = useMemo(() => {
+    const parts = shareCwd ? shareCwd.split('/') : [];
+    return [
+      { label: '根目录', rel: '' },
+      ...parts.map((part, index) => ({
+        label: part,
+        rel: parts.slice(0, index + 1).join('/')
+      }))
+    ];
+  }, [shareCwd]);
+
   const totalSize = files.reduce((acc, f) => acc + f.size, 0);
   // 后端没有"总容量"概念，真实约束是单文件大小上限，由 /api/info 下发
   const maxSize = serverInfo?.maxFileSize || 1024 * 1024 * 1024;
@@ -419,7 +488,7 @@ function App() {
     <div className="min-h-screen bg-surface-1 text-body">
       {/* Header */}
       <header className="border-b border-surface-4 bg-surface-2">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="text-2xl">📁</div>
             <h1 className="text-xl font-semibold text-strong">本地文件交互系统</h1>
@@ -435,7 +504,7 @@ function App() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-8">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
         {/* Server Info */}
         {serverInfo && (
           <div className="bg-surface-3 rounded-3xl p-6 mb-8 border border-surface-4">
@@ -496,7 +565,7 @@ function App() {
           onDragLeave={handleDrag}
           onDragOver={handleDrag}
           onDrop={handleDrop}
-          className={`bg-surface-2 rounded-3xl p-12 mb-8 border-2 border-dashed transition-all ${
+          className={`bg-surface-2 rounded-3xl p-6 sm:p-12 mb-8 border-2 border-dashed transition-all ${
             dragActive ? 'border-accent bg-surface-3' : 'border-surface-4'
           }`}
         >
@@ -568,7 +637,7 @@ function App() {
             <h2 className="text-lg font-semibold text-strong">共享目录（{shares.length}）</h2>
             <button
               onClick={() => setShowAddShare(v => !v)}
-              className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+              className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
             >
               ＋ 添加共享目录
             </button>
@@ -632,13 +701,15 @@ function App() {
                   <button
                     onClick={() => handleViewShare(share)}
                     disabled={!share.available}
-                    className="px-4 py-2 bg-surface-4 hover:bg-surface-5 disabled:opacity-50 disabled:cursor-not-allowed text-body rounded-full text-sm font-medium transition-colors"
+                    aria-label={`查看 ${share.name}`}
+                    className="px-4 py-2 bg-surface-4 hover:bg-surface-5 disabled:opacity-50 disabled:cursor-not-allowed text-body rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                   >
                     查看
                   </button>
                   <button
                     onClick={() => handleRemoveShare(share)}
-                    className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:bg-red-900/30 dark:hover:bg-red-900/50 dark:text-red-400 rounded-full text-sm font-medium transition-colors"
+                    aria-label={`移除 ${share.name}`}
+                    className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:bg-red-900/30 dark:hover:bg-red-900/50 dark:text-red-400 rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                     title="仅从共享列表移除，不删除文件"
                   >
                     移除
@@ -719,7 +790,7 @@ function App() {
                     {previewKind(file) && (
                       <button
                         onClick={() => openPreview(file)}
-                        className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+                        className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                       >
                         预览
                       </button>
@@ -727,7 +798,7 @@ function App() {
                     <button
                       onClick={() => toggleFavorite(file.id)}
                       aria-pressed={!!file.is_favorite}
-                      className={`favorite-button px-4 py-2 rounded-full text-sm font-medium transition-colors ${
+                      className={`favorite-button px-4 py-2 rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px] ${
                         file.is_favorite
                           ? 'is-favorite bg-amber-500/15 text-amber-700 dark:bg-amber-400/20 dark:text-amber-300'
                           : 'bg-surface-4 hover:bg-surface-5 text-body'
@@ -737,19 +808,19 @@ function App() {
                     </button>
                     <button
                       onClick={() => handleShowFileQR(file.id)}
-                      className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+                      className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                     >
                       二维码
                     </button>
                     <button
                       onClick={() => downloadFile(file.id)}
-                      className="px-4 py-2 bg-accent hover:bg-accent-muted text-surface-1 rounded-full text-sm font-semibold transition-colors"
+                      className="px-4 py-2 bg-accent hover:bg-accent-muted text-surface-1 rounded-full text-xs sm:text-sm font-semibold transition-colors min-h-[40px]"
                     >
                       下载
                     </button>
                     <button
                       onClick={() => handleUpdateFile(file.id)}
-                      className="px-4 py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:bg-blue-900/30 dark:hover:bg-blue-900/50 dark:text-blue-400 rounded-full text-sm font-medium transition-colors"
+                      className="px-4 py-2 bg-blue-500/10 hover:bg-blue-500/20 text-blue-600 dark:bg-blue-900/30 dark:hover:bg-blue-900/50 dark:text-blue-400 rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                       title="重新上传替换此文件"
                     >
                       更新
@@ -760,7 +831,7 @@ function App() {
                           deleteFile(file.id);
                         }
                       }}
-                      className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:bg-red-900/30 dark:hover:bg-red-900/50 dark:text-red-400 rounded-full text-sm font-medium transition-colors"
+                      className="px-4 py-2 bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:bg-red-900/30 dark:hover:bg-red-900/50 dark:text-red-400 rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                     >
                       删除
                     </button>
@@ -779,7 +850,7 @@ function App() {
 
       {/* 作者信息 */}
       <footer className="border-t border-surface-4 mt-8 py-6">
-        <div className="max-w-7xl mx-auto px-6 text-center text-xs text-soft flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 text-center text-xs text-soft flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
           <span>本地文件交互系统</span>
           <span className="text-faint">·</span>
           <span className="text-body font-medium">作者：你们喜爱的老王</span>
@@ -800,11 +871,11 @@ function App() {
       {/* Connect QR Modal */}
       {showConnectQR && connectQRData && (
         <div
-          className="fixed inset-0 bg-overlay flex items-center justify-center p-6 z-50"
+          className="fixed inset-0 bg-overlay flex items-center justify-center p-4 z-50"
           onClick={() => setShowConnectQR(false)}
         >
           <div
-            className="bg-surface-2 rounded-3xl p-8 max-w-md w-full border border-surface-4"
+            className="bg-surface-2 rounded-3xl p-6 sm:p-8 max-w-md w-full max-h-[92vh] overflow-y-auto border border-surface-4"
             onClick={e => e.stopPropagation()}
           >
             <h3 className="text-xl font-semibold text-strong mb-6 text-center">扫码连接</h3>
@@ -828,11 +899,11 @@ function App() {
       {/* File QR Modal */}
       {selectedFileQR && (
         <div
-          className="fixed inset-0 bg-overlay flex items-center justify-center p-6 z-50"
+          className="fixed inset-0 bg-overlay flex items-center justify-center p-4 z-50"
           onClick={() => setSelectedFileQR(null)}
         >
           <div
-            className="bg-surface-2 rounded-3xl p-8 max-w-md w-full border border-surface-4"
+            className="bg-surface-2 rounded-3xl p-6 sm:p-8 max-w-md w-full max-h-[92vh] overflow-y-auto border border-surface-4"
             onClick={e => e.stopPropagation()}
           >
             <h3 className="text-xl font-semibold text-strong mb-6 text-center">扫码下载</h3>
@@ -853,20 +924,20 @@ function App() {
         </div>
       )}
 
-      {/* 共享目录文件浏览弹窗 */}
+      {/* 共享目录文件浏览弹窗（按原目录层级 + 搜索；手机上全屏展示） */}
       {viewingShare && (
         <div
-          className="fixed inset-0 bg-overlay flex items-center justify-center p-4 z-50"
+          className="fixed inset-0 bg-overlay flex items-center justify-center sm:p-4 z-50"
           onClick={closeShareModal}
         >
           <div
-            className="bg-surface-2 rounded-3xl p-5 md:p-6 w-full max-w-3xl max-h-[85vh] flex flex-col border border-surface-4"
+            className="bg-surface-2 sm:rounded-3xl w-full h-full sm:h-auto sm:max-w-3xl sm:max-h-[85vh] p-4 sm:p-6 flex flex-col border-surface-4 sm:border"
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-label="共享目录文件"
           >
-            <div className="flex items-start justify-between gap-4 mb-4">
+            <div className="flex items-start justify-between gap-3 mb-3">
               <div className="min-w-0">
                 <h3 className="text-base md:text-lg font-semibold text-strong truncate" title={viewingShare.name}>
                   📂 {viewingShare.name}
@@ -881,7 +952,7 @@ function App() {
                   disabled={shareFiles === null && !shareFilesError}
                   aria-label="刷新文件列表"
                   title="刷新文件列表"
-                  className="w-9 h-9 rounded-full bg-surface-4 hover:bg-surface-5 disabled:opacity-50 disabled:cursor-not-allowed text-body transition-colors"
+                  className="w-10 h-10 sm:w-9 sm:h-9 rounded-full bg-surface-4 hover:bg-surface-5 disabled:opacity-50 disabled:cursor-not-allowed text-body transition-colors"
                 >
                   ⟳
                 </button>
@@ -889,12 +960,62 @@ function App() {
                   onClick={closeShareModal}
                   aria-label="关闭"
                   title="关闭（Esc）"
-                  className="w-9 h-9 rounded-full bg-surface-4 hover:bg-surface-5 text-body transition-colors"
+                  className="w-10 h-10 sm:w-9 sm:h-9 rounded-full bg-surface-4 hover:bg-surface-5 text-body transition-colors"
                 >
                   ✕
                 </button>
               </div>
             </div>
+
+            {/* 搜索框：输入即切换为全目录搜索（匹配文件名与相对路径） */}
+            <div className="relative mb-3">
+              <input
+                type="search"
+                value={shareSearch}
+                onChange={e => {
+                  setShareSearch(e.target.value);
+                  setShareVisibleCount(SHARE_PAGE_SIZE);
+                }}
+                placeholder="搜索共享目录里的文件"
+                aria-label="搜索共享目录里的文件"
+                className="w-full bg-surface-3 border border-surface-4 focus:border-accent rounded-full pl-4 pr-9 py-2.5 text-sm text-body focus:outline-none placeholder:text-faint [&::-webkit-search-cancel-button]:appearance-none"
+              />
+              {shareSearch && (
+                <button
+                  onClick={() => setShareSearch('')}
+                  aria-label="清空搜索"
+                  title="清空搜索"
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-soft hover:text-body text-sm leading-none px-1"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+
+            {/* 面包屑：搜索中隐藏；逐级可点击返回 */}
+            {!shareSearch && !shareFilesError && shareFiles && (
+              <nav aria-label="目录层级" className="flex items-center gap-1 flex-wrap text-xs text-soft mb-2">
+                {shareCrumbs.map((crumb, index) => (
+                  <span key={crumb.rel} className="flex items-center gap-1">
+                    {index > 0 && <span className="text-faint">/</span>}
+                    <button
+                      onClick={() => {
+                        setShareCwd(crumb.rel);
+                        setShareVisibleCount(SHARE_PAGE_SIZE);
+                      }}
+                      className={`px-2 py-1 rounded-full transition-colors max-w-[10rem] truncate ${
+                        crumb.rel === shareCwd
+                          ? 'bg-surface-4 text-strong font-medium'
+                          : 'hover:bg-surface-4 hover:text-body'
+                      }`}
+                      title={crumb.label}
+                    >
+                      {crumb.label}
+                    </button>
+                  </span>
+                ))}
+              </nav>
+            )}
 
             <div className="flex-1 overflow-y-auto min-h-[160px] space-y-2">
               {shareFilesError && (
@@ -911,14 +1032,45 @@ function App() {
                 </div>
               )}
 
-              {!shareFilesError && shareFiles && shareFiles.files.length === 0 && (
+              {!shareFilesError && shareFiles && !shareSearch &&
+                shareLevel.dirs.length === 0 && shareLevel.files.length === 0 && (
                 <div className="text-center py-10 text-soft">
                   <div className="text-4xl mb-3">📭</div>
-                  <p>目录里没有文件</p>
+                  <p>{shareCwd ? '这个文件夹是空的' : '目录里没有文件'}</p>
                 </div>
               )}
 
-              {!shareFilesError && shareFiles && shareFiles.files.slice(0, shareVisibleCount).map(entry => (
+              {!shareFilesError && shareFiles && shareSearch && shareLevel.files.length === 0 && (
+                <div className="text-center py-10 text-soft">
+                  <div className="text-4xl mb-3">🔍</div>
+                  <p>没有匹配「{shareSearch}」的文件</p>
+                </div>
+              )}
+
+              {/* 搜索中：显示文件所在子目录；层级浏览时只显示文件名 */}
+              {!shareFilesError && shareFiles && shareLevel.dirs.slice(0, shareVisibleCount).map(dir => (
+                <button
+                  key={dir.rel}
+                  onClick={() => {
+                    setShareCwd(dir.rel);
+                    setShareVisibleCount(SHARE_PAGE_SIZE);
+                  }}
+                  className="w-full flex items-center gap-3 bg-surface-3 rounded-xl px-3 py-2.5 border border-surface-4 hover:border-surface-5 hover:bg-surface-4 text-left transition-colors"
+                >
+                  <div className="text-2xl shrink-0">📁</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-strong truncate" title={dir.name}>{dir.name}</div>
+                    <div className="text-xs text-soft truncate">
+                      {dir.files.length > 0 ? `${dir.files.length} 个文件 · ` : ''}
+                      {dir.dirs.length > 0 ? `${dir.dirs.length} 个子文件夹 · ` : ''}
+                      打开
+                    </div>
+                  </div>
+                  <div className="text-soft shrink-0">›</div>
+                </button>
+              ))}
+
+              {!shareFilesError && shareFiles && shareLevel.files.slice(0, shareVisibleCount).map(entry => (
                 <div
                   key={entry.rel}
                   className="flex items-center gap-3 flex-wrap bg-surface-3 rounded-xl px-3 py-2.5 border border-surface-4"
@@ -939,7 +1091,7 @@ function App() {
                       </div>
                     )}
                     <div className="text-xs text-soft truncate">
-                      {entry.rel.includes('/')
+                      {shareSearch && entry.rel.includes('/')
                         ? `${entry.rel.slice(0, entry.rel.lastIndexOf('/'))} · `
                         : ''}
                       {formatSize(entry.size)} · {formatTime(entry.mtime)}
@@ -962,12 +1114,12 @@ function App() {
                 </div>
               ))}
 
-              {shareFiles && shareFiles.files.length > shareVisibleCount && (
+              {shareFiles && (shareLevel.dirs.length + shareLevel.files.length) > shareVisibleCount && (
                 <button
                   onClick={() => setShareVisibleCount(count => count + SHARE_PAGE_SIZE)}
                   className="w-full py-2.5 text-sm text-accent hover:underline"
                 >
-                  加载更多（还有 {(shareFiles.files.length - shareVisibleCount).toLocaleString()} 个文件）
+                  加载更多（还有 {(shareLevel.dirs.length + shareLevel.files.length - shareVisibleCount).toLocaleString()} 项）
                 </button>
               )}
 
@@ -987,14 +1139,14 @@ function App() {
         </div>
       )}
 
-      {/* 在线预览弹窗（视频/图片/音频/PDF） */}
+      {/* 在线预览弹窗（视频/图片/音频/PDF；手机上占满全屏） */}
       {previewFile && (
         <div
-          className="fixed inset-0 bg-overlay flex items-center justify-center p-4 z-50"
+          className="fixed inset-0 bg-overlay flex items-center justify-center sm:p-4 z-50"
           onClick={() => setPreviewFile(null)}
         >
           <div
-            className="bg-surface-2 rounded-3xl p-5 md:p-6 w-full max-w-4xl max-h-[90vh] overflow-y-auto border border-surface-4"
+            className="bg-surface-2 sm:rounded-3xl w-full h-full sm:h-auto sm:max-w-4xl sm:max-h-[90vh] p-4 sm:p-6 overflow-y-auto border-surface-4 sm:border"
             onClick={e => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
@@ -1029,7 +1181,7 @@ function App() {
                   controls
                   autoPlay
                   playsInline
-                  className="w-full max-h-[70vh] bg-black"
+                  className="w-full max-h-[55vh] sm:max-h-[70vh] bg-black"
                 >
                   您的浏览器不支持视频播放，请
                   <a href={previewFile.previewUrl}>点此打开</a>
@@ -1040,7 +1192,7 @@ function App() {
                 <img
                   src={previewFile.previewUrl}
                   alt={previewFile.filename}
-                  className="max-h-[70vh] max-w-full object-contain"
+                  className="max-h-[55vh] sm:max-h-[70vh] max-w-full object-contain"
                 />
               )}
 
@@ -1055,7 +1207,7 @@ function App() {
                 <iframe
                   src={previewFile.previewUrl}
                   title={previewFile.filename}
-                  className="w-full h-[70vh] bg-white"
+                  className="w-full h-[55vh] sm:h-[70vh] bg-white"
                 />
               )}
 
@@ -1071,12 +1223,12 @@ function App() {
               <span className="text-xs text-soft">
                 {formatSize(previewFile.size)} · {previewFile.mime_type || '未知类型'}
               </span>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
                 {['video', 'image', 'pdf'].includes(previewKind(previewFile)) && (
                   <button
                     onClick={handleFullscreen}
                     title="全屏查看（Esc 退出）"
-                    className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+                    className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                   >
                     ⛶ 全屏
                   </button>
@@ -1085,7 +1237,7 @@ function App() {
                   href={previewFile.previewUrl}
                   target="_blank"
                   rel="noreferrer"
-                  className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-sm font-medium transition-colors"
+                  className="px-4 py-2 bg-surface-4 hover:bg-surface-5 text-body rounded-full text-xs sm:text-sm font-medium transition-colors min-h-[40px]"
                 >
                   在新窗口打开
                 </a>
@@ -1098,7 +1250,7 @@ function App() {
                       downloadFile(previewFile.id);
                     }
                   }}
-                  className="px-4 py-2 bg-accent hover:bg-accent-muted text-surface-1 rounded-full text-sm font-semibold transition-colors"
+                  className="px-4 py-2 bg-accent hover:bg-accent-muted text-surface-1 rounded-full text-xs sm:text-sm font-semibold transition-colors min-h-[40px]"
                 >
                   下载
                 </button>
