@@ -6,6 +6,48 @@ import { readStoredTheme, applyTheme, storeTheme } from './theme';
 // 共享文件列表首批渲染条数：上限 5000 条一次性渲染在手机上会明显卡顿
 const SHARE_PAGE_SIZE = 200;
 
+// 排序选项：主文件列表与共享目录各自记住选择（localStorage）
+const SORT_OPTIONS = [
+  { value: 'time-desc', label: '时间：从新到旧' },
+  { value: 'time-asc', label: '时间：从旧到新' },
+  { value: 'name-asc', label: '名称：A → Z' },
+  { value: 'name-desc', label: '名称：Z → A' },
+  { value: 'size-desc', label: '大小：从大到小' },
+  { value: 'size-asc', label: '大小：从小到大' }
+];
+
+const readSortPref = (key, fallback) => {
+  try {
+    return window.localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const writeSortPref = (key, value) => {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // 隐私模式下 localStorage 不可用，忽略即可
+  }
+};
+
+// 通用排序比较器：key ∈ time|name|size，dir ∈ asc|desc
+const compareBySort = (mode, nameField, timeField) => {
+  const [key, dir] = mode.split('-');
+  const sign = dir === 'asc' ? 1 : -1;
+
+  return (a, b) => {
+    if (key === 'name') {
+      return sign * String(a[nameField] || '').localeCompare(String(b[nameField] || ''), 'zh-CN');
+    }
+    if (key === 'size') {
+      return sign * ((a.size || 0) - (b.size || 0));
+    }
+    return sign * ((a[timeField] || 0) - (b[timeField] || 0));
+  };
+};
+
 function App() {
   const {
     files,
@@ -53,6 +95,9 @@ function App() {
   // 目录层级浏览：当前所在子目录（'' = 共享根）；搜索优先于层级浏览
   const [shareCwd, setShareCwd] = useState('');
   const [shareSearch, setShareSearch] = useState('');
+  // 排序：文件列表与共享目录独立记忆
+  const [fileSort, setFileSort] = useState(() => readSortPref('fileSort', 'time-desc'));
+  const [shareSort, setShareSort] = useState(() => readSortPref('shareSort', 'name-asc'));
   const fileInputRef = useRef(null);
   // 递增令牌：忽略已关闭/已切换的共享目录请求的迟到响应
   const shareRequestRef = useRef(0);
@@ -436,9 +481,15 @@ function App() {
     return nodes;
   }, [shareFiles]);
 
-  // 当前层级内容；搜索时改为全量匹配（文件名 + 相对路径）
+  // 当前层级内容；搜索时改为全量匹配（文件名 + 相对路径）。
+  // 目录始终排在文件之前（文件管理器惯例）；目录内部顺序跟随排序方向的名称序
   const shareLevel = useMemo(() => {
     if (!shareFiles) return { dirs: [], files: [] };
+
+    const [sortKey, sortDir] = shareSort.split('-');
+    // 目录没有 size/mtime，选这两项时目录保持名称序（跟随升降方向）
+    const dirCompare = compareBySort(sortKey === 'name' ? shareSort : `name-${sortDir}`, 'name', 'mtime');
+    const fileCompare = compareBySort(shareSort, 'name', 'mtime');
 
     const query = shareSearch.trim().toLowerCase();
     if (query) {
@@ -446,13 +497,15 @@ function App() {
         dirs: [],
         files: shareFiles.files.filter(file =>
           file.name.toLowerCase().includes(query) || file.rel.toLowerCase().includes(query)
-        )
+        ).sort(fileCompare)
       };
     }
 
     const node = shareTree?.get(shareCwd);
-    return node ? { dirs: node.dirs, files: node.files } : { dirs: [], files: [] };
-  }, [shareFiles, shareTree, shareCwd, shareSearch]);
+    return node
+      ? { dirs: [...node.dirs].sort(dirCompare), files: [...node.files].sort(fileCompare) }
+      : { dirs: [], files: [] };
+  }, [shareFiles, shareTree, shareCwd, shareSearch, shareSort]);
 
   // 面包屑：['', 'a', 'b']（点击任意段直接跳转）
   const shareCrumbs = useMemo(() => {
@@ -472,7 +525,8 @@ function App() {
   const favoriteCount = files.filter(f => f.is_favorite).length;
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const visibleFiles = (showFavoritesOnly ? files.filter(f => f.is_favorite) : files)
-    .filter(f => !normalizedQuery || f.filename.toLowerCase().includes(normalizedQuery));
+    .filter(f => !normalizedQuery || f.filename.toLowerCase().includes(normalizedQuery))
+    .sort(compareBySort(fileSort, 'filename', 'upload_time'));
 
   // 空列表区分「没有文件」「没有收藏」「搜索无结果」三种情况
   let emptyMessage = '暂无文件';
@@ -728,6 +782,24 @@ function App() {
             </h2>
             <div className="flex items-center gap-2 flex-wrap">
               <div className="relative">
+                <select
+                  value={fileSort}
+                  onChange={(e) => {
+                    setFileSort(e.target.value);
+                    writeSortPref('fileSort', e.target.value);
+                  }}
+                  aria-label="文件排序方式"
+                  className="appearance-none bg-surface-3 border border-surface-4 hover:border-surface-5 focus:border-accent rounded-full pl-4 pr-9 py-2 text-sm text-body cursor-pointer focus:outline-none"
+                >
+                  {SORT_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-soft text-xs">
+                  ▾
+                </span>
+              </div>
+              <div className="relative">
                 <input
                   type="search"
                   value={searchQuery}
@@ -766,6 +838,7 @@ function App() {
             {visibleFiles.map(file => (
               <div
                 key={file.id}
+                data-file-name={file.filename}
                 className="bg-surface-3 rounded-2xl p-5 border border-surface-4 hover:border-surface-5 transition-colors"
               >
                 <div className="flex items-center gap-4 flex-wrap">
@@ -967,29 +1040,50 @@ function App() {
               </div>
             </div>
 
-            {/* 搜索框：输入即切换为全目录搜索（匹配文件名与相对路径） */}
-            <div className="relative mb-3">
-              <input
-                type="search"
-                value={shareSearch}
-                onChange={e => {
-                  setShareSearch(e.target.value);
-                  setShareVisibleCount(SHARE_PAGE_SIZE);
-                }}
-                placeholder="搜索共享目录里的文件"
-                aria-label="搜索共享目录里的文件"
-                className="w-full bg-surface-3 border border-surface-4 focus:border-accent rounded-full pl-4 pr-9 py-2.5 text-sm text-body focus:outline-none placeholder:text-faint [&::-webkit-search-cancel-button]:appearance-none"
-              />
-              {shareSearch && (
-                <button
-                  onClick={() => setShareSearch('')}
-                  aria-label="清空搜索"
-                  title="清空搜索"
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-soft hover:text-body text-sm leading-none px-1"
+            {/* 搜索 + 排序：输入即切换为全目录搜索（匹配文件名与相对路径） */}
+            <div className="flex items-center gap-2 mb-3">
+              <div className="relative flex-1 min-w-0">
+                <input
+                  type="search"
+                  value={shareSearch}
+                  onChange={e => {
+                    setShareSearch(e.target.value);
+                    setShareVisibleCount(SHARE_PAGE_SIZE);
+                  }}
+                  placeholder="搜索共享目录里的文件"
+                  aria-label="搜索共享目录里的文件"
+                  className="w-full bg-surface-3 border border-surface-4 focus:border-accent rounded-full pl-4 pr-9 py-2.5 text-sm text-body focus:outline-none placeholder:text-faint [&::-webkit-search-cancel-button]:appearance-none"
+                />
+                {shareSearch && (
+                  <button
+                    onClick={() => setShareSearch('')}
+                    aria-label="清空搜索"
+                    title="清空搜索"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-soft hover:text-body text-sm leading-none px-1"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <div className="relative shrink-0">
+                <select
+                  value={shareSort}
+                  onChange={e => {
+                    setShareSort(e.target.value);
+                    writeSortPref('shareSort', e.target.value);
+                    // 排序只改顺序不改集合，已展开的分页保持不动
+                  }}
+                  aria-label="共享目录排序方式"
+                  className="appearance-none bg-surface-3 border border-surface-4 hover:border-surface-5 focus:border-accent rounded-full pl-3 pr-8 py-2.5 text-xs sm:text-sm text-body cursor-pointer focus:outline-none"
                 >
-                  ✕
-                </button>
-              )}
+                  {SORT_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-soft text-xs">
+                  ▾
+                </span>
+              </div>
             </div>
 
             {/* 面包屑：搜索中隐藏；逐级可点击返回 */}
@@ -1051,6 +1145,8 @@ function App() {
               {!shareFilesError && shareFiles && shareLevel.dirs.slice(0, shareVisibleCount).map(dir => (
                 <button
                   key={dir.rel}
+                  data-entry-type="dir"
+                  data-entry-name={dir.name}
                   onClick={() => {
                     setShareCwd(dir.rel);
                     setShareVisibleCount(SHARE_PAGE_SIZE);
@@ -1073,6 +1169,8 @@ function App() {
               {!shareFilesError && shareFiles && shareLevel.files.slice(0, shareVisibleCount).map(entry => (
                 <div
                   key={entry.rel}
+                  data-entry-type="file"
+                  data-entry-name={entry.name}
                   className="flex items-center gap-3 flex-wrap bg-surface-3 rounded-xl px-3 py-2.5 border border-surface-4"
                 >
                   <div className="text-2xl shrink-0">{getFileIcon(entry.mime_type)}</div>
